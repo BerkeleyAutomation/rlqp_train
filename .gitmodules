@@ -1,6 +1,8 @@
 [submodule "rlqp-python"]
 	path = rlqp-python
-	url = https://github.com/oxfordcontrol/osqp-python.git
-[submodule "osqp_benchmarks"]
-	path = osqp_benchmarks
-	url = https://github.com/oxfordcontrol/osqp_benchmarks.git
+	url = git@github.com:BerkeleyAutomation/rlqp-python.git
+	branch = rlqp
+[submodule "rlqp_benchmarks"]
+	path = rlqp_benchmarks
+	url = git@github.com:BerkeleyAutomation/rlqp_benchmarks.git
+	branch = rlqp
