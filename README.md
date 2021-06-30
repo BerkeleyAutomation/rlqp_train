@@ -1,11 +1,16 @@
 
 # Submodules
 
-    rlqp_main
+    rlqp_train (this repo, not a fork)
     +- rlqp_benchmarks  (fork of https://github.com/osqp/osqp_benchmarks)
-    +- rlqp-python      (fork of https://github.com/osqp/osqp-python)
-       +- rlqp_solver   (fork of https://github.com/osqp/osqp.git)
-          +- qdldl      (https://github.com/osqp/qdldl, not forked)
+    
+# Requirements:
+
+The RLQP python solver must be separately installed.
+
+    rlqp-python      (fork of https://github.com/osqp/osqp-python)
+    +- rlqp_solver   (fork of https://github.com/osqp/osqp.git)
+       +- qdldl      (https://github.com/osqp/qdldl, not forked)
 
 # Setup instructions
 
