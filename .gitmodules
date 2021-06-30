@@ -1,7 +1,3 @@
-[submodule "rlqp-python"]
-	path = rlqp-python
-	url = git@github.com:BerkeleyAutomation/rlqp-python.git
-	branch = rlqp
 [submodule "rlqp_benchmarks"]
 	path = rlqp_benchmarks
 	url = git@github.com:BerkeleyAutomation/rlqp_benchmarks.git
