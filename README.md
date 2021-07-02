@@ -37,9 +37,9 @@ Compile and install the RLQP Python wrapper (1 time per git update)
     % rm -rf build extension/src/*.a osqp_sources/build
     % python setup.py install
 
-Install osqp_benchmarks to the venv:
+Install rlqp_benchmarks to the venv:
 
-    % cd $RLQP/osqp_benchmarks
+    % cd $RLQP/rlqp_benchmarks
     % python setup.py develop
 
 Place this project in development mode (1 time)
