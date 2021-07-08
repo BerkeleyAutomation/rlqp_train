@@ -134,6 +134,7 @@ class QPEnv:
             high=np.array([1e6], dtype=np.float32))
 
     def add_benchmark_problem_class(self, name, min_dim, max_dim):
+        log.info(f"Adding {name} problem class with dimension range=[{min_dim}, {max_dim}]")
         problem_class = EXAMPLES_MAP[name]
         self.problems.append(
             BenchmarkGen(problem_class, min_dim, max_dim))
