@@ -36,14 +36,24 @@ class EpochLogger:
         argumens and the saved file.
         """
         save_file = os.path.join(self._save_dir, "settings.json")
-        settings = convert_json(settings)
+        settings = convert_json(vars(settings))
         if os.path.isfile(save_file):
             with open(save_file, "rt") as f:
                 saved_settings = json.load(f)
             if saved_settings != settings:
+                log.warn("SETTINGS CHANGED BETWEEN RUNS!")
+                for k in settings:
+                    if k not in saved_settings:
+                        log.warn(f"{k}: {settings[k]} is new")
+                for k in saved_settings:
+                    if k not in settings:
+                        log.warn(f"{k}: {saved_settings[k]} is missing")
+                for k in settings:
+                    if k in saved_settings and settings[k] != saved_settings[k]:
+                        log.warn(f"{k}: {saved_settings[k]} -> {settings[k]}")
                 raise ValueError("settings changed between runs")
         else:
-            s = json.dumps(settings, separators=(',', ':\t'), indent=4, sort_keys=True)
+            s = json.dumps(vars(settings), separators=(',', ':\t'), indent=4, sort_keys=True)
             log.info(f"Settings = {s}")
             with open(save_file, "wt") as f:
                 f.write(s)
@@ -81,13 +91,16 @@ class EpochLogger:
         Writes accumulated data, and key-value argument pairs to the
         log/event file.
         """
+        log.info(f"Epoch {epoch_no} done")
         for k,v in self._info.items():
             values = np.array(v, dtype=np.float32)
             if len(values) > 0:
                 self._summary_writer.add_histogram("RLQP/"+k, values, epoch_no)
+                log.info(f"  {k}: range=[{np.amin(values)}, {np.amax(values)}], mean={np.mean(values)} + {np.std(values)}")
                 
         for k,v in kwargs.items():
             self._summary_writer.add_scalar("RLQP/"+k, v, epoch_no)
+            log.info(f"  {k}: {v}")
         
         self._summary_writer.flush()
         self._info = defaultdict(list)

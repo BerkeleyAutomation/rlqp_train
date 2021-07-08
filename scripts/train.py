@@ -1,51 +1,75 @@
 import logging
 from rlqp_train.qp_env import QPEnv
 from rlqp_train.ddpg import DDPG
+import argparse
 
-if '__main__' == __name__:
-    logging.basicConfig(level=logging.DEBUG)
+# https://stackoverflow.com/questions/12116685/how-can-i-require-my-python-scripts-argument-to-be-a-float-between-0-0-1-0-usin
+class Range:
+    def __init__(self, start, end=None):
+        self.start = start
+        self.end = end
+    def __eq__(self, other):
+        return self.start <= other <= self.end
+    def __contains__(self, item):
+        return self.__eq__(item)
+    def __iter__(self):
+        yield self
+    def __repr__(self):
+        return 'range [{0}, {1}]'.format(self.start, self.end)
 
-    env = QPEnv(
-        eps = 1e-6,
-        step_reward = -1,
-        iterations_per_step=200)
+parser = argparse.ArgumentParser()
+parser.add_argument("--replay_size", metavar="SIZE", type=int, default=int(1e6), choices=Range(1000,1<<32-1), help="Replay buffer size (default: %(default)s)")
+parser.add_argument("--pi_lr", metavar="LR", type=float, default=1e-3, choices=Range(0, 1), help="Initial learning rate for policy (default: %(default)s)")
+parser.add_argument("--q_lr", metavar="LR", type=float, default=1e-3, choices=Range(0, 1), help="Initial learning rate for critic (default: %(default)s)")
+parser.add_argument("--lr_decay_rate", metavar="RATE", type=float, default=0.999, choices=Range(0, 1), help="Decay step for learning rates (default: %(default)s)")
+parser.add_argument("--steps_per_epoch", metavar="N", type=int, default=2000, choices=Range(0, 1<<32-1), help="Steps per epoch (default: %(default)s)")
+parser.add_argument("--hidden_sizes", metavar="H", type=int, nargs='+', default=[128, 128, 128], choices=Range(1,1<<20), help="Hidden layer size(s), (default: %(default)s)")
+parser.add_argument("--num_test_episodes", metavar="T", type=int, default=16, choices=Range(0, 1<<32-1), help="Number of test episodes per epoch (default: %(default)s)")
+parser.add_argument("--num_epochs", metavar="NUM", type=int, default=25, choices=Range(1, 10000), help="Number of training epochs (default: %(default)s)")
+parser.add_argument("--max_ep_len", metavar="LEN", type=int, default=100, choices=Range(1, 10000), help="Maximum episode length (default: %(default)s)")
+parser.add_argument("--update_every", metavar="STEP", type=int, default=1000, choices=Range(1, 1<<32-1), help="Frequency of network updates (default: %(default)s)")
+parser.add_argument("--batch_size", metavar="SIZE", type=int, default=100, choices=Range(1, 1000000), help="Batch size for updates (default: %(default)s)")
+parser.add_argument("--seed", type=int, default=20210708, help="Random number generator seed (default: %(default)s)")
+parser.add_argument("--gamma", type=float, default=0.99, choices=Range(0, 1), help="Discount factor (default: %(default)s)")
+parser.add_argument("--polyak", type=float, default=0.995, choices=Range(0, 1), help="Polyak rate (default: %(default)s)")
+parser.add_argument("--act_noise", metavar="VAR", type=float, default=2.0, choices=Range(0.0, 15.0), help="Action exploration noise (default: %(default)s)")
+parser.add_argument("--update_after", metavar="STEP", type=int, default=1000, choices=Range(1, 1<<32-1), help="Initial steps before first update (default: %(default)s)")
+parser.add_argument("--start_steps", metavar="STEP", type=int, default=5000, choices=Range(1, 1<<32-1), help="Initial steps before using actor policy (default: %(default)s)")
+parser.add_argument("--debug", action='store_true', help="Enable debug-level messages")
+# Environment related options
+parser.add_argument("--qp_iters_per_step", metavar="M", type=int, default=200, choices=Range(1, 10000),
+                        help="Number of QP ADMM (internal) iterations per adaptation (default: %(default)s)")
+parser.add_argument("--qp_step_reward", metavar="R", type=float, default=-1.0, choices=Range(-1e9, -1e-6), help="Reward for each step (default: %(default)s)")
+parser.add_argument("--qp_eps", metavar="EPS", type=float, default=1e-6, choices=Range(1e-9, 1.0), help="Set termination epsilon for QP (default: %(default)s)")
 
-    env.add_benchmark_problem_class("Random QP", 10, 100)
-    # env.add_benchmark_problem_class("Eq QP", 10, 2000) # Solves too quickly
-    env.add_benchmark_problem_class("Portfolio", 5, 15)
-    env.add_benchmark_problem_class("Lasso", 10, 20)
-    env.add_benchmark_problem_class("SVM", 10, 20)
-    # env.add_benchmark_problem_class("Huber", 10, 200) # Solves too quickly
-    env.add_benchmark_problem_class("Control", 10, 10)
+hparams = parser.parse_args()
+logging.basicConfig(level=logging.DEBUG if hparams.debug else logging.INFO)
+del hparams.debug
+
+env = QPEnv(
+    eps = hparams.qp_eps,
+    step_reward = hparams.qp_step_reward,
+    iterations_per_step=hparams.qp_iters_per_step)
+
+del hparams.qp_eps
+del hparams.qp_step_reward
+del hparams.qp_iters_per_step
+
+env.add_benchmark_problem_class("Random QP", 10, 100)
+# env.add_benchmark_problem_class("Eq QP", 10, 2000) # Solves too quickly
+env.add_benchmark_problem_class("Portfolio", 5, 15)
+env.add_benchmark_problem_class("Lasso", 10, 20)
+env.add_benchmark_problem_class("SVM", 10, 20)
+# env.add_benchmark_problem_class("Huber", 10, 200) # Solves too quickly
+env.add_benchmark_problem_class("Control", 10, 10)
     
-    ddpg = DDPG(
-        save_dir = 'experiments/ddpg_train',
-        env = env,
-        hparams = dict(
-            replay_size = int(1e6), # TODO 1e8
-            pi_lr = 1e-3,
-            q_lr = 1e-3,
-            lr_decay_rate = 0.999,
-            steps_per_epoch = 2000,
-            hidden_sizes = (128, 128, 128),
-            num_test_episodes = 16,
-            num_epochs = 50,
-            max_ep_len = 100,
-            update_every = 1000,
-            batch_size = 100,
-            seed = 5,
-            gamma = 0.99,
-            polyak = 0.995,
-            act_noise = 2.0,
-            update_after = 1000,
-            start_steps = 5000))
-        # start_act_noise = 1.0)
+ddpg = DDPG(
+    save_dir = 'experiments/ddpg_train',
+    env = env,
+    hparams = hparams)
 
-    #exp_name = "benchmarks"
-    
-    # ddpg.load_state(exp_name)
-    ddpg.train()
-    #ddpg.save_state(exp_name)
+ddpg.train()
+
     
                     
                 

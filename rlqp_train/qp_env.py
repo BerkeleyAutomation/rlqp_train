@@ -148,7 +148,7 @@ class QPEnv:
 
         episode = self._random_episode(no, rng)
         while episode.done():
-            print("  already solved")
+            log.debug("  already solved")
             episode = self._random_episode(no, rng)
 
         return episode

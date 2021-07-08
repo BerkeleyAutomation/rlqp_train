@@ -58,36 +58,13 @@ class ActorCritic(nn.Module):
     def act(self, obs):
         return self.pi(obs).detach().numpy()
 
-from schema import Schema, And, Use
-
 class DDPG:
-    HPARAM_SCHEMA = Schema({
-        'seed': Use(int),
-        'batch_size': And(Use(int), lambda x: 10 <= x <= int(1e8)),
-        'act_noise': And(Use(float), lambda x: 0.0 <= x <= 1e9),
-        'gamma': And(Use(float), lambda x: 0.0 <= x <= 1.0),
-        'hidden_sizes': (And(Use(int), lambda x: x > 0),),
-        'lr_decay_rate': And(Use(float), lambda x: 0.0 <= x <= 1.0),
-        'max_ep_len': And(Use(int), lambda x: x > 1),
-        'num_epochs': And(Use(int), lambda x: 1 <= x <= 1000),
-        'num_test_episodes': Use(int),
-        'pi_lr': Use(float),
-        'q_lr': Use(float),
-        'replay_size': And(Use(int), lambda x: x > 1000),
-        'start_steps': And(Use(int), lambda x: x > 0),
-        'steps_per_epoch': And(Use(int), lambda x: x > 0),
-        'update_after': And(Use(int), lambda x: x > 0),
-        'update_every': And(Use(int), lambda x: x > 0),
-        'polyak': And(Use(float), lambda x: 0.0 < x < 1.0)
-        })
     def __init__(self, save_dir, env, hparams):
-
         # replay_size, pi_lr, q_lr, lr_decay_rate,
         #     hidden_sizes, steps_per_epoch, num_test_episodes, num_epochs,
         #     max_ep_len, update_every, batch_size, seed,
         #     save_freq, gamma, polyak, act_noise,
         #     update_after, start_steps): #, start_act_noise):
-        hparams = self.HPARAM_SCHEMA.validate(hparams)
             
         self.env = env
 
@@ -101,8 +78,8 @@ class DDPG:
         self.hparams = hparams        
 
         # Seed
-        self.rng = np.random.default_rng(hparams['seed']) # TODO: seed
-        torch.manual_seed(hparams['seed'])
+        self.rng = np.random.default_rng(hparams.seed) # TODO: seed
+        torch.manual_seed(hparams.seed)
 
         input_encoding = Mode8 # TODO: get from caller.
         output_activation = lambda : ExpTanh(
@@ -111,7 +88,7 @@ class DDPG:
         self.ac = ActorCritic(
             input_encoding,
             act_dim,
-            hidden_sizes = hparams['hidden_sizes'],
+            hidden_sizes = hparams.hidden_sizes,
             activation = nn.ReLU,
             output_activation = output_activation)
         
@@ -119,25 +96,25 @@ class DDPG:
         freeze(self.ac_targ, True)
 
         self.replay_buffer = ReplayBuffer(os.path.join(save_dir, "replay_buffer"),
-                                              obs_dim, act_dim, hparams['replay_size'])
+                                              obs_dim, act_dim, hparams.replay_size)
 
         checkpoint = self.epoch_logger.load_checkpoint() or dict(
-            pi_lr=hparams['pi_lr'],
-            q_lr=hparams['q_lr'],
+            pi_lr=hparams.pi_lr,
+            q_lr=hparams.q_lr,
             ep_no=0,
             epoch_no=0,
             prev_update=0,
-            next_update=hparams['update_after'],
-            next_epoch=hparams['steps_per_epoch'],
+            next_update=hparams.update_after,
+            next_epoch=hparams.steps_per_epoch,
             test_no=0)
         
         self.pi_opt = Adam(self.ac.pi.parameters(), lr=checkpoint['pi_lr'])
         self.q_opt = Adam(self.ac.q.parameters(), lr=checkpoint['q_lr'])
         
         self.pi_lr_scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer=self.pi_opt, step_size=1, gamma=hparams['lr_decay_rate'])
+            optimizer=self.pi_opt, step_size=1, gamma=hparams.lr_decay_rate)
         self.q_lr_scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer=self.q_opt, step_size=1, gamma=hparams['lr_decay_rate'])
+            optimizer=self.q_opt, step_size=1, gamma=hparams.lr_decay_rate)
 
         self.ep_no = checkpoint['ep_no']
         self.epoch_no = checkpoint['epoch_no']
@@ -153,13 +130,12 @@ class DDPG:
             self.q_opt.load_state_dict(checkpoint['q_opt'])
             self.pi_lr_scheduler.load_state_dict(checkpoint['pi_lr_scheduler'])
             self.q_lr_scheduler.load_state_dict(checkpoint['q_lr_scheduler'])
-            # TODO: optimizer state
 
     def compute_q_loss(self, obs, act, rew, ob2, don):
         q = self.ac.q(obs, act)
         with torch.no_grad():
             q_pi_targ = self.ac_targ.q(ob2, self.ac_targ.pi(ob2))
-            backup = rew + self.hparams['gamma'] * (1 - don) * q_pi_targ
+            backup = rew + self.hparams.gamma * (1 - don) * q_pi_targ
         loss_q = ((q - backup)**2).mean()
         q_vals = q.detach().numpy()[0]
         return loss_q, q_vals
@@ -184,8 +160,8 @@ class DDPG:
 
         with torch.no_grad():
             for p, p_targ in zip(self.ac.parameters(), self.ac_targ.parameters()):
-                p_targ.data.mul_(self.hparams['polyak'])
-                p_targ.data.add_((1.0 - self.hparams['polyak']) * p.data)
+                p_targ.data.mul_(self.hparams.polyak)
+                p_targ.data.add_((1.0 - self.hparams.polyak) * p.data)
 
     def get_action(self, obs, noise_scale, rng):
         """Uses the policy to compute an action, optionally adding noise."""
@@ -240,11 +216,11 @@ class DDPG:
 
         # Step until we've reached the episode length or the episode
         # is done.
-        while len(ep_log) < self.hparams['max_ep_len'] and not done:
+        while len(ep_log) < self.hparams.max_ep_len and not done:
             if use_start_actions:
                 act = self.random_action(obs, rng)
             else:
-                act = self.get_action(obs, self.hparams['act_noise'], rng)
+                act = self.get_action(obs, self.hparams.act_noise, rng)
 
             ob2, rew, done, _ = episode.step(act)
             
@@ -268,7 +244,7 @@ class DDPG:
     def test_episode(self, test_no):
         episode = self.env.new_episode(test_no)
         obs, done, ep_ret, ep_len = episode.get_obs(), False, 0, 0
-        while not (done or ep_len == self.hparams['max_ep_len']):
+        while not (done or ep_len == self.hparams.max_ep_len):
             obs, r, done, _ = episode.step(self.get_action(obs, 0, None))
             ep_ret += r
             ep_len += 1
@@ -284,23 +260,23 @@ class DDPG:
             with torch.no_grad():
                 while steps_taken < self.next_epoch and steps_taken < self.next_update:
                     self.ep_no += 1
-                    ep_ret, ep_len = self.run_episode(self.ep_no, steps_taken < self.hparams['start_steps'])
+                    ep_ret, ep_len = self.run_episode(self.ep_no, steps_taken < self.hparams.start_steps)
                     steps_taken = self.replay_buffer.steps_taken()
             
             while steps_taken >= self.next_update:
                 for _ in range(self.prev_update, self.next_update):
-                    batch = self.replay_buffer.sample_batch(self.rng, self.hparams['batch_size'])
+                    batch = self.replay_buffer.sample_batch(self.rng, self.hparams.batch_size)
                     self.update(data=batch)
                 self.prev_update = self.next_update
-                self.next_update += self.hparams['update_every']
+                self.next_update += self.hparams.update_every
 
         with torch.no_grad():
-            for _ in range(self.hparams['num_test_episodes']): # TODO: this is not really a hyper parameter
+            for _ in range(self.hparams.num_test_episodes): # TODO: this is not really a hyper parameter
                 self.test_no += 1
                 ep_ret, ep_len = self.test_episode(self.test_no)
                 self.epoch_logger.accum(TestEpRet=ep_ret, TestEpLen=ep_len)
 
-        self.next_epoch += self.hparams['steps_per_epoch']
+        self.next_epoch += self.hparams.steps_per_epoch
         
         data_fill = (self.replay_buffer.index() - start_index) / self.replay_buffer.capacity
 
@@ -329,5 +305,5 @@ class DDPG:
             q_lr_scheduler=self.q_lr_scheduler.state_dict())
 
     def train(self):
-        while self.epoch_no < self.hparams['num_epochs']:
+        while self.epoch_no < self.hparams.num_epochs:
             self.train_epoch()
