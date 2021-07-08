@@ -24,6 +24,20 @@ class Box:
     def sample(self, rng):
         return rng.uniform(low=self.low, high=self.high, size=self.shape).astype(self.dtype)
 
+class ExpBox:
+    def __init__(self, low, high, dtype=np.float32):
+        self.low_exp = np.log10(low)
+        self.high_exp = np.log10(high)
+        self.low = low
+        self.high = high
+        self.shape = self.low.shape
+        self.size = self.low.size
+        self.dtype = dtype
+
+    def sample(self, rng):
+        return 10**rng.uniform(low=self.low_exp, high=self.high_exp, size=self.shape).astype(self.dtype)
+    
+
 class QPEpisode:
     def __init__(self, P, q, A, l, u, eps, step_reward, iterations_per_step):
         initial_rho = 0.1 # TODO: configurable.
@@ -58,24 +72,26 @@ class QPEpisode:
             self.solver._model.lower_bound,
             self.solver._model.upper_bound,
             self.solver._model.rho_vec
-        ])
-    
-    def get_obs_orig(self):
-        lo = self.solver._model.z - self.lower_bound
-        hi = self.upper_bound - self.solver._model.z
-        return np.stack([
-            np.log10(np.clip(np.minimum(lo, hi), 1e-8, 1e6)),
-            np.clip(self.solver._model.y, Y_MIN, Y_MAX),
-            np.clip(self.solver._model.z - self.solver._model.Ax, AX_MIN, AX_MAX),
-            np.log10(self.solver._model.rho_vec)
         ], axis=-1)
+    
+    # def get_obs_orig(self):
+    #     lo = self.solver._model.z - self.lower_bound
+    #     hi = self.upper_bound - self.solver._model.z
+    #     return np.stack([
+    #         np.log10(np.clip(np.minimum(lo, hi), 1e-8, 1e6)),
+    #         np.clip(self.solver._model.y, Y_MIN, Y_MAX),
+    #         np.clip(self.solver._model.z - self.solver._model.Ax, AX_MIN, AX_MAX),
+    #         np.log10(self.solver._model.rho_vec)
+    #     ], axis=-1)
 
     def done(self):
         return self.info.status == 'solved'
 
     def step(self, action):
-        #log.debug(f"action={action}")
-        self.solver._model.rho_vec = 10**action
+        """Sets the rho_vec on the QP, and then solves the QP for a number of iterations.
+        action is [m, 1] values for the rho vector.
+        """
+        self.solver._model.rho_vec = action # 10**action
         self.info = self.solver.solve().info
         done = (self.info.status == "solved")
         reward = self.step_reward * (not done)
@@ -113,9 +129,9 @@ class QPEnv:
             high= np.array([  1e6,  1e6,  1e6,  1e6,  1e6, 1e+6 ], dtype=np.float32))
             #low= np.array([ -8.0, Y_MIN, AX_MIN, -6.0], dtype=np.float32),
             #high=np.array([  6.0, Y_MAX, AX_MAX,  6.0], dtype=np.float32))
-        self.action_space = Box(
-            low=np.array([-6.0], dtype=np.float32),
-            high=np.array([ 6.0], dtype=np.float32))
+        self.action_space = ExpBox(
+            low=np.array([1e-6], dtype=np.float32),
+            high=np.array([1e6], dtype=np.float32))
 
     def add_benchmark_problem_class(self, name, min_dim, max_dim):
         problem_class = EXAMPLES_MAP[name]

@@ -18,10 +18,10 @@ class Mode8(nn.Module):
         lo = z - l
         hi = u - z
 
-        return torch.stack((
+        return torch.stack([
             torch.log10(torch.clamp(torch.minimum(lo, hi), 1e-8, 1e6)),
             torch.clamp(y,      -1e6, 1e6),
             torch.clamp(z - Ax, -1e6, 1e6),
-            torch.log10(rho)),
-            dim=1)
+            torch.log10(torch.clamp(rho, 1e-6, 1e6))],
+            axis=-1) #dim=1)
         

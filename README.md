@@ -47,3 +47,12 @@ Place this project in development mode (1 time)
     % cd $RLQP
     % python setup.py develop
 
+# Example Training:
+
+    % python scripts/train.py
+
+# Monitoring Training with Tensorboard
+
+Assuming logs are being written to a subdirectory in experiments, run (with the virtualenv active):
+
+    % tensorboard --logdir experiments

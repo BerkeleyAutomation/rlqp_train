@@ -13,44 +13,47 @@ import os
 
 log = logging.getLogger("ddpg")
 
-class Actor(nn.Module):
-    def __init__(self, obs_mode, act_dim, hidden_sizes, activation, act_min, act_max):
+class ExpTanh(nn.Module):
+    def __init__(self, min_val, max_val):
         super().__init__()
-        self.input_mode = obs_mode() # TODO: remove obs_dim, since Mode will be the input
-        layer_sizes = [self.input_mode.output_dim] + list(hidden_sizes) + [act_dim]
-        #layer_sizes = [obs_dim] + list(hidden_sizes) + [act_dim]
+        assert(min_val.shape == (1,)) # TODO: handle different input shapes better
+        assert(max_val.shape == (1,))
+        min_exp = np.log10(min_val[0])
+        max_exp = np.log10(max_val[0])
+        self.scale = (max_exp - min_exp) * 0.5
+        self.min_exp = min_exp
+        
+    def forward(self, x):
+        x = (torch.tanh(x) + 1.0) * self.scale + self.min_exp
+        return 10.0**x
+
+class Actor(nn.Module):
+    def __init__(self, input_encoding, act_dim, hidden_sizes, activation, output_activation): #act_min, act_max):
+        super().__init__()
+        self.input_encoding = input_encoding() # TODO: remove obs_dim, since Mode will be the input
+        layer_sizes = [self.input_encoding.output_dim] + list(hidden_sizes) + [act_dim]
         log.info(f"Actor layers: {layer_sizes}")
-        self.pi = mlp(layer_sizes, activation, output_activation=nn.Tanh) #, input_transform=self.input_mode)
-        self.act_min = act_min[0]
-        self.act_max = act_max[0]
-
-        self.act_scale = (self.act_max - self.act_min) * 0.5
-
-        log.info(f"act scale={self.act_scale}")
+        self.mlp = mlp(layer_sizes, activation, output_activation=output_activation) #, input_transform=self.input_mode)
 
     def forward(self, obs):
-        #return 0.5 * (self.pi(obs) + 1.0) + self.act_min
-        obs = self.input_mode(obs)
-        return (self.pi(obs) + 1.0) * self.act_scale + self.act_min
+        return self.mlp(self.input_encoding(obs))
 
 class Critic(nn.Module):
-    def __init__(self, obs_mode, act_dim, hidden_sizes, activation):
+    def __init__(self, input_encoding, act_dim, hidden_sizes, activation):
         super().__init__()
-        # TODO: use Mode8
-        self.input_mode = obs_mode() # TODO: replace obs_dim with this.
-        self.q = mlp([self.input_mode.output_dim + act_dim] + list(hidden_sizes) + [1], activation)
+        self.input_encoding = input_encoding() # TODO: replace obs_dim with this.
+        self.mlp = mlp([self.input_encoding.output_dim + act_dim] + list(hidden_sizes) + [1], activation)
 
     def forward(self, obs, act):
-        obs = self.input_mode(obs)
-        arg = torch.cat([obs, act], dim=-1)
-        q = self.q(arg)
+        arg = torch.cat([self.input_encoding(obs), torch.log10(act)], dim=-1)
+        q = self.mlp(arg)
         return torch.squeeze(q, -1)
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_mode, act_dim, hidden_sizes, activation, act_min, act_max):
+    def __init__(self, input_encoding, act_dim, hidden_sizes, activation, output_activation):
         super().__init__()
-        self.pi = Actor(obs_mode, act_dim, hidden_sizes, activation, act_min, act_max)
-        self.q = Critic(obs_mode, act_dim, hidden_sizes, activation)
+        self.pi = Actor(input_encoding, act_dim, hidden_sizes, activation, output_activation)
+        self.q = Critic(input_encoding, act_dim, hidden_sizes, activation)
 
     def act(self, obs):
         return self.pi(obs).detach().numpy()
@@ -101,15 +104,16 @@ class DDPG:
         self.rng = np.random.default_rng(hparams['seed']) # TODO: seed
         torch.manual_seed(hparams['seed'])
 
-        obs_mode = Mode8
+        input_encoding = Mode8 # TODO: get from caller.
+        output_activation = lambda : ExpTanh(
+            env.action_space.low, env.action_space.high)
         
         self.ac = ActorCritic(
-            obs_mode,
+            input_encoding,
             act_dim,
             hidden_sizes = hparams['hidden_sizes'],
             activation = nn.ReLU,
-            act_min = env.action_space.low,
-            act_max = env.action_space.high)
+            output_activation = output_activation)
         
         self.ac_targ = deepcopy(self.ac)
         freeze(self.ac_targ, True)
@@ -147,6 +151,7 @@ class DDPG:
             self.ac_targ.load_state_dict(checkpoint['ac_targ'])
             self.pi_opt.load_state_dict(checkpoint['pi_opt'])
             self.q_opt.load_state_dict(checkpoint['q_opt'])
+            # TODO: optimizer state
 
     def compute_q_loss(self, obs, act, rew, ob2, don):
         q = self.ac.q(obs, act)
@@ -181,9 +186,16 @@ class DDPG:
                 p_targ.data.add_((1.0 - self.hparams['polyak']) * p.data)
 
     def get_action(self, obs, noise_scale, rng):
+        """Uses the policy to compute an action, optionally adding noise."""
         a = self.ac.act(torch.as_tensor(obs, dtype=torch.float32))
         if noise_scale:
-            a += noise_scale * rng.standard_normal(self.env.action_space.size)
+            # a += noise_scale * rng.standard_normal(self.env.action_space.size)
+            # In prior code we added noise before computing the
+            # exponent.  I.e., action = 10**(a + N) Now we're using:
+            #   a' = 10**a, so we compute
+            # action=10**(a + N) = a' * 10**N
+            a *= 10**(noise_scale * rng.standard_normal(self.env.action_space.size))
+            
         return np.clip(a, self.env.action_space.low[0],
                           self.env.action_space.high[0])
 
@@ -199,10 +211,17 @@ class DDPG:
         return ep_len, ep_ret
 
     def random_action(self, o, rng):
+        """Computes a random action to take.
+
+        This supports both scalar- and vector-based training.  If
+        vector-based, and the action is a scalar, it is tiled across to
+        all the action vector.
+        """
         a = self.env.action_space.sample(rng)
         if not np.isscalar(o) and o.shape[0] != self.env.observation_space.shape[0]:
             a = np.tile(a, (o.shape[0], 1))
-        return a;
+            # TODO: sample the vector space, instead of tiling a single action
+        return a
 
     def run_episode(self, ep_no, use_start_actions):
         # To gain some determinism for debugging, and to allow
@@ -251,6 +270,7 @@ class DDPG:
             obs, r, done, _ = episode.step(self.get_action(obs, 0, None))
             ep_ret += r
             ep_len += 1
+        log.info(f"test episode {test_no} done, len={ep_len}, ret={ep_ret}")
         return ep_ret, ep_len
 
     def train_epoch(self):
