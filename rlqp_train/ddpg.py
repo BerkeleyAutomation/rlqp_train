@@ -151,6 +151,8 @@ class DDPG:
             self.ac_targ.load_state_dict(checkpoint['ac_targ'])
             self.pi_opt.load_state_dict(checkpoint['pi_opt'])
             self.q_opt.load_state_dict(checkpoint['q_opt'])
+            self.pi_lr_scheduler.load_state_dict(checkpoint['pi_lr_scheduler'])
+            self.q_lr_scheduler.load_state_dict(checkpoint['q_lr_scheduler'])
             # TODO: optimizer state
 
     def compute_q_loss(self, obs, act, rew, ob2, don):
@@ -322,7 +324,9 @@ class DDPG:
             ac=self.ac.state_dict(),
             ac_targ=self.ac_targ.state_dict(),
             pi_opt=self.pi_opt.state_dict(),
-            q_opt=self.q_opt.state_dict())
+            q_opt=self.q_opt.state_dict(),
+            pi_lr_scheduler=self.pi_lr_scheduler.state_dict(),
+            q_lr_scheduler=self.q_lr_scheduler.state_dict())
 
     def train(self):
         while self.epoch_no < self.hparams['num_epochs']:
