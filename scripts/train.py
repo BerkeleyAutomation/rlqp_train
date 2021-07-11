@@ -38,6 +38,7 @@ parser.add_argument("--q_lr", metavar="LR", type=float, default=1e-3, choices=Ra
 parser.add_argument("--lr_decay_rate", metavar="RATE", type=float, default=0.999, choices=Range(0, 1), help="Decay step for learning rates (default: %(default)s)")
 parser.add_argument("--steps_per_epoch", metavar="N", type=int, default=2000, choices=Range(0, 1<<32-1), help="Steps per epoch (default: %(default)s)")
 parser.add_argument("--hidden_sizes", metavar="H", type=int, nargs='+', default=[128, 128, 128], choices=Range(1,1<<20), help="Hidden layer size(s), (default: %(default)s)")
+parser.add_argument("--hidden_activation", type=str, default="ReLU", choices={"ReLU"}, help="Hidden layer activation (default: %(default)s)")
 parser.add_argument("--num_test_episodes", metavar="T", type=int, default=16, choices=Range(0, 1<<32-1), help="Number of test episodes per epoch (default: %(default)s)")
 parser.add_argument("--num_epochs", metavar="NUM", type=int, default=25, choices=Range(1, 10000), help="Number of training epochs (default: %(default)s)")
 parser.add_argument("--max_ep_len", metavar="LEN", type=int, default=100, choices=Range(1, 10000), help="Maximum episode length (default: %(default)s)")
@@ -51,12 +52,12 @@ parser.add_argument("--update_after", metavar="STEP", type=int, default=1000, ch
 parser.add_argument("--start_steps", metavar="STEP", type=int, default=5000, choices=Range(1, 1<<32-1), help="Initial steps before using actor policy (default: %(default)s)")
 parser.add_argument("--debug", action='store_true', help="Enable debug-level messages")
 
-
-
+# Set up logging,
 hparams = parser.parse_args()
 logging.basicConfig(level=logging.DEBUG if hparams.debug else logging.INFO)
 del hparams.debug
 
+# Set up the training environment
 env = QPEnv(
     eps = hparams.qp_eps,
     step_reward = hparams.qp_step_reward,
@@ -66,26 +67,12 @@ for e in hparams.qp_env:
     name, min_dim, max_dim = e.split(':')
     env.add_benchmark_problem_class(name, int(min_dim), int(max_dim))
 
-del hparams.qp_env
-del hparams.qp_eps
-del hparams.qp_step_reward
-del hparams.qp_iters_per_step
+del hparams.qp_env, hparams.qp_eps, hparams.qp_step_reward, hparams.qp_iters_per_step
 
-# env.add_benchmark_problem_class("Random QP", 10, 100)
-# # env.add_benchmark_problem_class("Eq QP", 10, 2000) # Solves too quickly
-# env.add_benchmark_problem_class("Portfolio", 5, 15)
-# env.add_benchmark_problem_class("Lasso", 10, 20)
-# env.add_benchmark_problem_class("SVM", 10, 20)
-# # env.add_benchmark_problem_class("Huber", 10, 200) # Solves too quickly
-# env.add_benchmark_problem_class("Control", 10, 10)
-
+# Set up the RL algorithm and run it
 save_dir = hparams.save_dir
 del hparams.save_dir
-
-ddpg = DDPG(
-    save_dir = save_dir,
-    env = env,
-    hparams = hparams)
+ddpg = DDPG(save_dir=save_dir, env=env, hparams=hparams)
 
 ddpg.train()
 

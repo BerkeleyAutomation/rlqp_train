@@ -1,6 +1,10 @@
 import torch
 import torch.nn as nn
 
+activation_name_map = {
+    "ReLU" : nn.ReLU
+}
+
 def mlp(sizes, activation, input_transform=None, output_activation=nn.Identity):
     layers = [] if input_transform is None else [input_transform]
     for j in range(len(sizes)-2):

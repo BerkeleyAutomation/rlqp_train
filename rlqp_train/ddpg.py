@@ -60,12 +60,6 @@ class ActorCritic(nn.Module):
 
 class DDPG:
     def __init__(self, save_dir, env, hparams):
-        # replay_size, pi_lr, q_lr, lr_decay_rate,
-        #     hidden_sizes, steps_per_epoch, num_test_episodes, num_epochs,
-        #     max_ep_len, update_every, batch_size, seed,
-        #     save_freq, gamma, polyak, act_noise,
-        #     update_after, start_steps): #, start_act_noise):
-            
         self.env = env
 
         self.epoch_logger = EpochLogger(save_dir=save_dir)

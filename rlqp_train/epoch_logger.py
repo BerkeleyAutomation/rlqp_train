@@ -23,12 +23,13 @@ def convert_json(obj):
     return None
 
 class EpochLogger:
-    def __init__(self, save_dir):
-        if not os.path.isdir(save_dir):
+    def __init__(self, save_dir, read_only=False):
+        if not os.path.isdir(save_dir) and not read_only:
             os.makedirs(save_dir)
         self._save_dir = save_dir
         self._info = defaultdict(list)
-        self._summary_writer = SummaryWriter(log_dir=save_dir)
+        if not read_only:
+            self._summary_writer = SummaryWriter(log_dir=self._save_dir)
 
     def save_settings(self, settings):
         """Saves settings to a json file if it does not exist, otherwise
@@ -74,14 +75,15 @@ class EpochLogger:
         cp['epoch_no'] = epoch_no
         torch.save(cp, save_file)
 
-    def load_checkpoint(self):
-        epoch_no = 1
-        while os.path.isfile(os.path.join(self._save_dir, f"checkpoint_{epoch_no:03d}.pt")):
-            epoch_no += 1
-        epoch_no -= 1
+    def load_checkpoint(self, epoch_no=None):
+        if epoch_no is not None:
+            epoch_no = 1
+            while os.path.isfile(os.path.join(self._save_dir, f"checkpoint_{epoch_no:03d}.pt")):
+                epoch_no += 1
+            epoch_no -= 1
         
-        if epoch_no == 0:
-            return None
+            if epoch_no == 0:
+                return None
         
         return torch.load(os.path.join(self._save_dir, f"checkpoint_{epoch_no:03d}.pt"))
 
