@@ -43,7 +43,7 @@ class QPEpisode:
         initial_rho = 0.1 # TODO: configurable.
         settings = {
             'verbose': False,
-            'adaptive_rho': 0,
+            'adaptive_rho': False,
             'eps_rel': eps,
             'eps_abs': eps,
             'rho': initial_rho,
@@ -140,7 +140,7 @@ class QPEnv:
             BenchmarkGen(problem_class, min_dim, max_dim))
 
     def _random_episode(self, no, rng):
-        qp_gen = self.problems[no % len(self.problems)]
+        qp_gen = self.problems[rng.integers(len(self.problems))]
         return qp_gen(rng, self.eps, self.step_reward, self.iterations_per_step)
         
     def new_episode(self, no, rng=None):

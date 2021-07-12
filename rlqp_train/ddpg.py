@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.optim import Adam
 import numpy as np
 import logging
+from time import time
 from copy import deepcopy
 from rlqp_train.replay_buffer import ReplayBuffer
 from rlqp_train.util import mlp, freeze, frozen
@@ -199,12 +200,14 @@ class DDPG:
         # To gain some determinism for debugging, and to allow
         # episodes to run on separate threads, each episode gets its
         # own sequentially seeded random number generator.
+        t_start = time()
         rng = np.random.default_rng(ep_no)
 
         # Generate a new episode
         episode = self.env.new_episode(ep_no, rng=rng)
 
         obs, done, ep_log, ep_ret = episode.get_obs(), False, [], 0
+        t_eps = time()
         
         log.debug(f"obs = {obs.shape}")
 
@@ -222,16 +225,19 @@ class DDPG:
             ep_log.append((obs, act, rew, ob2, done))
             obs = ob2
 
+        t_steps = time()
         self.epoch_logger.accum(EpRet=ep_ret, EpLen=len(ep_log))
             
         # if not done:
         #     ep_log = ep_log[:10]
 
-        log.info(f"episode {ep_no} done, len={len(ep_log)}, ret={ep_ret}")
-
         with self.replay_buffer._lock:
             for o, a, r, o2, done in ep_log:
                 self.replay_buffer.store_array(o, a, r, o2, done)
+
+        t_store = time()
+
+        log.debug(f"episode {ep_no} done, len={len(ep_log)}, ret={ep_ret}, times (setup+run+store)={t_eps-t_start:.3f}+{t_steps-t_eps:.3f}+{t_store-t_steps:.3f}={t_store-t_start:.3f}")
 
         return ep_ret, len(ep_log)
 

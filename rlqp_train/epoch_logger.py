@@ -54,7 +54,7 @@ class EpochLogger:
                         log.warn(f"{k}: {saved_settings[k]} -> {settings[k]}")
                 raise ValueError("settings changed between runs")
         else:
-            s = json.dumps(vars(settings), separators=(',', ':\t'), indent=4, sort_keys=True)
+            s = json.dumps(settings, separators=(',', ':\t'), indent=4, sort_keys=True)
             log.info(f"Settings = {s}")
             with open(save_file, "wt") as f:
                 f.write(s)
@@ -76,7 +76,7 @@ class EpochLogger:
         torch.save(cp, save_file)
 
     def load_checkpoint(self, epoch_no=None):
-        if epoch_no is not None:
+        if epoch_no is None:
             epoch_no = 1
             while os.path.isfile(os.path.join(self._save_dir, f"checkpoint_{epoch_no:03d}.pt")):
                 epoch_no += 1
