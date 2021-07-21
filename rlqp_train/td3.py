@@ -1,211 +1,373 @@
+import os
 import torch
 import torch.nn as nn
-from util import mlp, combined_shape, freeze
+from torch.optim import Adam
+import numpy as np
+import logging
+from time import time
+from copy import deepcopy
+from rlqp_train.replay_buffer import ReplayBuffer
+from rlqp_train.util import mlp, freeze, frozen, NonPool
+from rlqp_train.epoch_logger import EpochLogger
+from rlqp_train.rho_vec_input import Mode8
+from multiprocessing.pool import Pool
+from threading import Semaphore
 
-class ReplayBuffer:
-    def __init__(self, obs_dim, act_dim, size):
-        self.obs_buf = np.zeros(combined_shape(size, obs_dim), dtype=np.float32)
-        self.obs2_buf = np.zeros(combined_shape(size, obs_dim), dtype=np.float32)
-        self.act_buf = np.zeros(combined_shape(size, act_dim), dtype=np.float32)
-        self.rew_buf = np.zeros(size, dtype=np.float32)
-        self.done_buf = np.zeros(size, dtype=np.float32)
-        self.index, self.capacity = 0, size
+import os
 
-    def store(self, obs, act, rew, next_obs, done):
-        i = self.index % self.capacity
-        self.obs_buf[i] = obs
-        self.obs2_buf[i] = next_obs
-        self.act_buf[i] = act
-        self.rew_buf[i] = rew
-        self.done_buf[i] = done
-        self.index += 1
+log = logging.getLogger("ddpg")
 
-    def sample_batch(self, rng, batch_size):
-        idxs = rng.randint(0, min(self.index, self.capacity), size=batch_size)
-        batch = dict(obs=self.obs_buf[idxs],
-                     obs2=self.obs2_buf[idxs],
-                     act=self.act_buf[idxs],
-                     rew=self.req_buf[idxs],
-                     done=self.done_buf[idxs])
-        return { k: torch.as_tensor(v, dtype=torch.float32) for k,v in batch.items() }
+class ExpTanh(nn.Module):
+    def __init__(self, min_val, max_val):
+        super().__init__()
+        assert(min_val.shape == (1,)) # TODO: handle different input shapes better
+        assert(max_val.shape == (1,))
+        min_exp = np.log10(min_val[0])
+        max_exp = np.log10(max_val[0])
+        self.scale = (max_exp - min_exp) * 0.5
+        self.min_exp = min_exp
+        
+    def forward(self, x):
+        x = (torch.tanh(x) + 1.0) * self.scale + self.min_exp
+        return 10.0**x
 
 class Actor(nn.Module):
-    def __init__(self, obs_dim, act_dim, hidden_sizes, activation, act_limit)
+    def __init__(self, input_encoding, act_dim, hidden_sizes, activation, output_activation): #act_min, act_max):
         super().__init__()
-        pi_sizes = [obs_dim] + list(hidden_sizes) + [act_dim]
-        self.pi = mlp(pi_sizes, activation, nn.Tanh)
-        self.act_limit = act_limit
+        self.input_encoding = input_encoding() # TODO: remove obs_dim, since Mode will be the input
+        layer_sizes = [self.input_encoding.output_dim] + list(hidden_sizes) + [act_dim]
+        log.info(f"Actor layers: {layer_sizes}")
+        self.mlp = mlp(layer_sizes, activation, output_activation=output_activation) #, input_transform=self.input_mode)
 
     def forward(self, obs):
-        return self.act_limit * self.pi(obs)
+        return self.mlp(self.input_encoding(obs))
 
-class QFunction(nn.Module):
-    def __init__(self, obs_dim, act_dim, hidden_sizes, activation):
+class Critic(nn.Module):
+    def __init__(self, input_encoding, act_dim, hidden_sizes, activation):
         super().__init__()
-        self.q = mlp([obs_dim + act_dim] + list(hidden_sizes) + [1], activation)
+        self.input_encoding = input_encoding() # TODO: replace obs_dim with this.
+        self.mlp = mlp([self.input_encoding.output_dim + act_dim] + list(hidden_sizes) + [1], activation)
 
     def forward(self, obs, act):
-        q = self.q(torch.cat([obs, act], dim=-1))
+        arg = torch.cat([self.input_encoding(obs), torch.log10(act)], dim=-1)
+        q = self.mlp(arg)
         return torch.squeeze(q, -1)
 
 class ActorCritic(nn.Module):
-    def __init__(self, observation_space, action_space, hidden_sizes=(64,64),
-                     activation=nn.ReLU)
+    def __init__(self, input_encoding, act_dim, hidden_sizes, activation, output_activation):
         super().__init__()
-        obs_dim = observation_space.shape[0]
-        act_dim = action_space.shape[0]
-        act_limit = action_space.high[0]
-
-        self.pi = Actor(obs_dim, act_dim, hidden_sizes, activation, act_limit)
-        self.q1 = QFunction(obs_dim, act_dim, hidden_sizes, activation)
-        self.q2 = QFunction(obs_dim, act_dim, hidden_sizes, activation)
+        self.pi = Actor(input_encoding, act_dim, hidden_sizes, activation, output_activation)
+        self.qs = [ Critic(input_encoding, act_dim, hidden_sizes, activation) for _ in range(2) ]
 
     def act(self, obs):
-        with torch.no_grad():
-            return self.pi(obs).numpy()
+        return self.pi(obs).detach().numpy()
+
+def init_proc():
+    log.debug(f"initializing {os.getpid()}")
+    os.environ["OMP_NUM_THREADS"] = "1"
 
 class TD3:
-    HPARAM_SCHEMA = Schema({
-        'seed': Use(int),
-        'steps_per_epoch': And(Use(int), lambda x: x > 0),
-        'replay_size': And(Use(int), lambda x: x > 1000),
-        'gamma': And(Use(float), lambda x: 0.0 <= x <= 1.0),
-        'polyak': And(Use(float), lambda x: 0.0 < x < 1.0)
-        'pi_lr': And(Use(float), lambda x: x > 0.0),
-        'q_lr': And(Use(float), lambda x: x > 0.0),
-        'batch_size': And(Use(int), lambda x: 10 <= x <= int(1e8)),
-        'start_steps': And(Use(int), lambda x: x > 0),
-        'update_after': And(Use(int), lambda x: x > 0),
-        'update_every': And(Use(int), lambda x: x > 0),
-        'act_noise': And(Use(float), lambda x: 0.0 <= x <= 1e9),
-        'target_noise': And(Use(float), lambda x: x > 0),
-        'noise_clip': And(Use(float), lambda x: x > 0),
-        'policy_delay', And(Use(int), lambda x: x > 0),
-        'num_test_episodes': And(Use(int), lambda x: x>0),
-        'max_ep_len': And(Use(int), lambda x: x > 1),
-        })
-    def __init__(self, env, replay_size):
+    def __init__(self, save_dir, env, hparams):
         self.env = env
 
-        # TODO: seed
+        self.epoch_logger = EpochLogger(save_dir=save_dir)
+        self.epoch_logger.save_settings(hparams)
+        
+        obs_dim = env.observation_space.size
+        act_dim = env.action_space.size
 
-        self.ac = ActorCritic(env.observation_space, env.action_space)
+        # hparams includes num_workers, num_test_episodes, and seed
+        # which we consider (perhaps arguably) not to be
+        # hyperparameters.  We thus don't store them in the json file.
+        # This means we can restart training with different settings
+        # for each.
+        self.num_workers = hparams.num_workers
+        self.num_test_episodes = hparams.num_test_episodes
+
+        # Seed
+        self.rng = np.random.default_rng(hparams.seed)
+        torch.manual_seed(hparams.seed)
+        
+        del hparams.num_workers, hparams.num_test_episodes, hparams.seed
+
+        # Hyperparameters
+        self.hparams = hparams        
+
+
+        input_encoding = Mode8 # TODO: get from caller.
+        output_activation = lambda : ExpTanh(
+            env.action_space.low, env.action_space.high)
+        
+        self.ac = ActorCritic(
+            input_encoding,
+            act_dim,
+            hidden_sizes = hparams.hidden_sizes,
+            activation = nn.ReLU,
+            output_activation = output_activation)
+        
         self.ac_targ = deepcopy(self.ac)
+        freeze(self.ac_targ, True)
 
-        for p in self.ac_targ.parameters():
-            p.requires_grad = False
+        self.replay_buffer = ReplayBuffer(os.path.join(save_dir, "replay_buffer"),
+                                              obs_dim, act_dim, hparams.replay_size)
 
-        self.q_params = itertools.chain(
-            self.ac.q1.parameters(),
-            self.ac.q2.parameters())
+        checkpoint = self.epoch_logger.load_checkpoint() or dict(
+            pi_lr=hparams.pi_lr,
+            q_lr=hparams.q_lr,
+            ep_no=0,
+            epoch_no=0,
+            prev_update=0,
+            next_update=hparams.update_after,
+            next_epoch=hparams.steps_per_epoch,
+            test_no=0)
 
-        self.replay_buffer = ReplayBuffer(obs_dim=env.observation_space.shape,
-                                              act_dim=env.action_space.shape,
-                                              size=replay_size)
+        self.q_params = itertools.chain(*[q.parameters() for q in self.ac.qs])
+        
+        self.pi_opt = Adam(self.ac.pi.parameters(), lr=checkpoint['pi_lr'])
+        self.q_opt = Adam(self.q_params, lr=checkpoint['q_lr'])
+        
+        self.pi_lr_scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer=self.pi_opt, step_size=1, gamma=hparams.lr_decay_rate)
+        self.q_lr_scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer=self.q_opt, step_size=1, gamma=hparams.lr_decay_rate)
 
-        self.pi_optimizer = Adam(self.ac.parameters(), lr=pi_lr)
-        self.q_optimizer = Adam(self.q_params, lr=q_lr)
+        self.ep_no = checkpoint['ep_no']
+        self.epoch_no = checkpoint['epoch_no']
+        self.prev_update = checkpoint['prev_update']
+        self.next_update = checkpoint['next_update']
+        self.next_epoch = checkpoint['next_epoch']
+        self.test_no = checkpoint['test_no']
 
-    def compute_loss_q(self, obs, act, rew, obs2, done):
-        q1 = self.ac.q1(o, a)
-        q2 = self.ac.q2(o, a)
+        if self.epoch_no > 0:
+            self.ac.load_state_dict(checkpoint['ac'])
+            self.ac_targ.load_state_dict(checkpoint['ac_targ'])
+            self.pi_opt.load_state_dict(checkpoint['pi_opt'])
+            self.q_opt.load_state_dict(checkpoint['q_opt'])
+            self.pi_lr_scheduler.load_state_dict(checkpoint['pi_lr_scheduler'])
+            self.q_lr_scheduler.load_state_dict(checkpoint['q_lr_scheduler'])
 
+    def compute_q_loss(self, obs, act, rew, ob2, don):
+        qs = [ q(obs, act) for q in self.ac.qs ]
         with torch.no_grad():
-            pi_targ = self.ac_targ.pi(o2)
+            pi_targ = self.ac_targ.pi(ob2)
+            eps = torch.clamp(torch.rand_like(pi_targ) * target_noise, -noise_clip, noise_clip)
+            act2 = torch.clamp(pi_targ + eps, -act_limit, act_limit)
+            q_pi_targ = torch.min(*[ q(ob2, act2) for q in self.ac_targ.qs ])
+            backup = rew + self.hparams.gamma * (1 - don) * q_pi_targ
+        loss_qs = [ ((q - backup)**2).mean() for q in qs ]
+        loss_q = loss_qs[0] + loss_qs[1]
+        q_vals = [ q.detach().numpy()[0] for q in qs ]
+        return loss_q, q_vals
 
-            epsilon = torch.randn_like(pi_targ) * target_noise
-            epsilon = torch.clamp(epsilon, -noise_clip, noise_clip)
+    def compute_pi_loss(self, obs):
+        q_pi = self.ac.qs[0](obs, self.ac.pi(obs))
+        return -q_pi.mean()
 
-            a2 = pi_targ + epsilon
-            a2 = torch.clamp(a2, -act_limit, act_limit)
-
-            q1_pi_targ = self.ac_targ.q1(o2, a2)
-            q2_pi_targ = self.ac_targ.q2(o2, a2)
-
-            q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
-            backup = r + gamma * (1 - d) * q_pi_targ
-
-        loss_q1 = ((q1 - backup)**2).mean()
-        loss_q2 = ((q2 - backup)**2).mean()
-        loss_q = loss_q1 + loss_q2
-
-        loss_info = dict(Q1Vals=q1.detach().numpy(),
-                         Q2Vals=q2.detach().numpy())
-
-        return loss_q, loss_info
-
-    def compute_loss_pi(self, obs):
-        q1_pi = self.ac.q1(obs, self.pi(obs))
-        return -q1_pi.mean()
-
-    def update(self, data, timer):
-        self.q_optimizer.zero_grad()
-        loss_q, loss_info = self.compute_loss_q(*data)
+    def update(self, data, update_no):
+        self.q_opt.zero_grad()
+        loss_q, q_vals = self.compute_q_loss(**data)
         loss_q.backward()
-        self.q_optimizer.step()
+        self.q_opt.step()
 
-        # TODO: Log loss_q.item() and **loss_info
+        self.epoch_logger.accum(**{f"LossQ{i}":loss_q[i], f"QVals{i}":q_vals[i]})
+        #self.epoch_logger.accum(LossQ=loss_q.item(), QVals=q_vals.item())
 
-        if timer % policy_delay == 0:
-            for p in self.q_params:
-                p.requires_grad = False
+        if update_no % self.hparams.policy_delay == 0:
+            with frozen(self.q_params):
+                self.pi_opt.zero_grad()
+                loss_pi = self.compute_pi_loss(data['obs'])
+                loss_pi.backward()
+                self.pi_opt.step()
 
-            self.pi_optimizer.zero_grad()
-            loss_pi = self.compute_loss_pi(data['obs'])
-            loss_pi.backward()
-            self.pi_optimizer.step()
+            self.epoch_logger.accum(LossPi=loss_pi.item())
 
-            for p in self.q_params:
-                p.requires_grad = True
-
-            # TODO log loss_pi.item()
-
-            while torch.no_grad():
+            with torch.no_grad():
                 for p, p_targ in zip(self.ac.parameters(), self.ac_targ.parameters()):
-                    p_targ.data.mul_(self.polyak)
-                    p_targ.data.add_((1 - self.polyak) * p.data)
+                    p_targ.data.mul_(self.hparams.polyak)
+                    p_targ.data.add_((1.0 - self.hparams.polyak) * p.data)
 
-    def get_action(self, rng):
-        a = self.ac.act(torch.as_tensor(o, dtype=torch.float32))
-        a += noise_scale * rng.randn(act_dim)
-        return np.clip(a, -act_limit, act_limit)
+    def get_action(self, obs, noise_scale, rng):
+        """Uses the policy to compute an action, optionally adding noise."""
+        a = self.ac.act(torch.as_tensor(obs, dtype=torch.float32))
+        if noise_scale:
+            # a += noise_scale * rng.standard_normal(self.env.action_space.size)
+            # In prior code we added noise before computing the
+            # exponent.  I.e., action = 10**(a + N) Now we're using:
+            #   a' = 10**a, so we compute
+            # action=10**(a + N) = a' * 10**N
+            a *= 10**(noise_scale * rng.standard_normal(self.env.action_space.size))
+            
+        return np.clip(a, self.env.action_space.low[0],
+                          self.env.action_space.high[0])
 
-    def test_agent(self):
-        for j in range(num_test_episodes):
-            episode = env.new_episode()
-            o, d, ep_ret, ep_len = episode.get_obs(), False, 0, 0
-            while not (d or (ep_len == max_ep_len)):
-                o, r, d, _ = episode.step(get_action(o, 0))
-                ep_ret += r
-                ep_len += 1
-            # TODO: log ep_ret, rep_len
+    def test_agent(self, test_no):
+        rng = np.random.default_rng(test_no + int(1e9))
+        episode = self.env.new_episode(test_no, rng=rng)
+        obs, done, ep_len, ep_ret = episode.get_obs(), False, 0, 0
+        while ep_len < self.max_ep_len and not done:
+            obs, rew, done, _ = episode.step(self.get_action(obs, 0, rng))
+            ep_len += 1
+            ep_ret += rew
 
-    def epoch(self):
-        for t in range(steps_per_epoch):
-            if t < start_steps:
-                a = self.env.action_space.sample(rng)
+        return ep_len, ep_ret
+
+    def random_action(self, o, rng):
+        """Computes a random action to take.
+
+        This supports both scalar- and vector-based training.  If
+        vector-based, and the action is a scalar, it is tiled across to
+        all the action vector.
+        """
+        a = self.env.action_space.sample(rng)
+        if not np.isscalar(o) and o.shape[0] != self.env.observation_space.shape[0]:
+            a = np.tile(a, (o.shape[0], 1))
+            # TODO: sample the vector space, instead of tiling a single action
+        return a
+
+    def run_episode(self, ep_no, use_start_actions):
+        log.info(f"Run {ep_no} on {os.getpid()}")
+        # To gain some determinism for debugging, and to allow
+        # episodes to run on separate threads, each episode gets its
+        # own sequentially seeded random number generator.
+        t_start = time()
+        rng = np.random.default_rng(ep_no)
+
+        # Generate a new episode
+        episode = self.env.new_episode(ep_no, rng=rng)
+
+        obs, done, ep_log, ep_ret = episode.get_obs(), False, [], 0
+        t_eps = time()
+        
+        log.debug(f"obs = {obs.shape}")
+
+        # Step until we've reached the episode length or the episode
+        # is done.
+        while len(ep_log) < self.hparams.max_ep_len and not done:
+            if use_start_actions:
+                act = self.random_action(obs, rng)
             else:
-                a = self.get_action(o, act_noise)
+                act = self.get_action(obs, self.hparams.act_noise, rng)
 
-            o2, r, d, _ = env.step(a)
+            ob2, rew, done, _ = episode.step(act)
+            
+            ep_ret += rew
+            ep_log.append((obs, act, rew, ob2, done))
+            obs = ob2
+
+        t_steps = time()
+        self.epoch_logger.accum(EpRet=ep_ret, EpLen=len(ep_log))
+            
+        # if not done:
+        #     ep_log = ep_log[:10]
+
+        with self.replay_buffer._lock:
+            for o, a, r, o2, done in ep_log:
+                index = self.replay_buffer.store_array(o, a, r, o2, done)
+
+        t_store = time()
+
+        log.debug(f"episode {ep_no} done, len={len(ep_log)}, ret={ep_ret}, times (setup+run+store)={t_eps-t_start:.3f}+{t_steps-t_eps:.3f}+{t_store-t_steps:.3f}={t_store-t_start:.3f}, fill={index/self.replay_buffer.capacity:.3f}")
+
+        return ep_ret, len(ep_log)
+
+    def test_episode(self, test_no):
+        episode = self.env.new_episode(test_no)
+        obs, done, ep_ret, ep_len = episode.get_obs(), False, 0, 0
+        while not (done or ep_len == self.hparams.max_ep_len):
+            obs, r, done, _ = episode.step(self.get_action(obs, 0, None))
             ep_ret += r
             ep_len += 1
+        log.info(f"test episode {test_no} done, len={ep_len}, ret={ep_ret}")
+        return ep_ret, ep_len
 
-            if ep_len == max_ep_len:
-                d = False
+    def create_pool(self):
+        return NonPool() if self.workers == 1 else Pool(self.num_workers, init_proc)
 
-            self.replay_buffer.store(o, a, r, o2, d)
+    def train_epoch(self):
+        self.epoch_no += 1
+        log.info(f"Starting epoch {self.epoch_no}")
+        steps_taken = self.replay_buffer.steps_taken()
+        start_index = self.replay_buffer.index()
+        semaphore = Semaphore(self.num_workers)
+        while steps_taken < self.next_epoch:
+            with torch.no_grad():
+                log.debug(f"starting process pool with {self.num_workers} workers")
+                # Hacky: declare do_run_episode as global to avoid pickling self
+                # https://stackoverflow.com/a/61879723
+                global do_run_episode
+                def do_run_episode(*args):
+                    return self.run_episode(*args)
+                
+                with self.create_pool() as pool:
+                    while steps_taken < self.next_epoch and steps_taken < self.next_update:
+                        self.ep_no += 1
+                        log.debug(f"launching {self.ep_no}, steps_taken={steps_taken} < next_epoch={self.next_epoch}, next_update={self.next_update}")
+                        def done(x):
+                            log.debug(f"done {x}")
+                            ep_ret, ep_len = x
+                            self.epoch_logger.accum(EpRet=ep_ret, EpLen=ep_len)
+                            semaphore.release()
+                        pool.apply_async(
+                            do_run_episode,
+                            (self.ep_no, steps_taken < self.hparams.start_steps), {},
+                            done, done)
+)
+                        semaphore.acquire()
+                        steps_taken = self.replay_buffer.steps_taken()
+                    pool.close()
+                    pool.join()
+            
+            while steps_taken >= self.next_update:
+                for update_no in range(self.prev_update, self.next_update):
+                    log.info(f"Update {update_no}")
+                    batch = self.replay_buffer.sample_batch(self.rng, self.hparams.batch_size)
+                    self.update(data=batch, update_no)
+                self.prev_update = self.next_update
+                self.next_update += self.hparams.update_every
 
-            o = o2
+        with torch.no_grad():
+            global do_test_episode
+            def do_test_episode(*args):
+                return self.test_episode(*args)
+            with self.create_pool() as pool:
+                results = []
+                for _ in range(self.num_test_episodes):
+                    self.test_no += 1
+                    results.append(pool.apply_async(do_test_episode, (self.test_no,), {}))
+                pool.close()
+                pool.join()
+                for r in results:
+                    ep_ret, ep_len = r.get()
+                    self.epoch_logger.accum(TestEpRet=ep_ret, TestEpLen=ep_len)
 
-            if d or (ep_len == max_ep_len):
-                # TODO: log ep_ret, ep_len
-                episode = env.new_episode()
-                o, ep_ret, ep_len = episode.get_obs(), 0, 0
+        self.next_epoch += self.hparams.steps_per_epoch
+        
+        data_fill = (self.replay_buffer.index() - start_index) / self.replay_buffer.capacity
 
-            if t >= update_after and t % update_every == 0:
-                for j in range(update_every):
-                    batch = self.replay_buffer.sample_batch(batch_size)
-                    self.update(data=batch, timer=j)
+        self.epoch_logger.epoch(self.epoch_no,
+            data_fill=data_fill,
+            pi_lr=self.pi_opt.param_groups[0]['lr'],
+            q_lr=self.q_opt.param_groups[0]['lr'])            
 
-        self.test_agent()
+        self.pi_lr_scheduler.step()
+        self.q_lr_scheduler.step()
+
+        self.epoch_logger.save_checkpoint(
+            self.epoch_no,
+            pi_lr=self.pi_opt.param_groups[0]['lr'],
+            q_lr=self.q_opt.param_groups[0]['lr'],
+            ep_no=self.ep_no,
+            prev_update=self.prev_update,
+            next_update=self.next_update,
+            next_epoch=self.next_epoch,
+            test_no=self.test_no,
+            ac=self.ac.state_dict(),
+            ac_targ=self.ac_targ.state_dict(),
+            pi_opt=self.pi_opt.state_dict(),
+            q_opt=self.q_opt.state_dict(),
+            pi_lr_scheduler=self.pi_lr_scheduler.state_dict(),
+            q_lr_scheduler=self.q_lr_scheduler.state_dict())
+
+    def train(self):
+        while self.epoch_no < self.hparams.num_epochs:
+            self.train_epoch()

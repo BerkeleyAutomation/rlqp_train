@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from torch.optim import Adam
@@ -6,9 +7,11 @@ import logging
 from time import time
 from copy import deepcopy
 from rlqp_train.replay_buffer import ReplayBuffer
-from rlqp_train.util import mlp, freeze, frozen
+from rlqp_train.util import mlp, freeze, frozen, NonPool
 from rlqp_train.epoch_logger import EpochLogger
 from rlqp_train.rho_vec_input import Mode8
+from multiprocessing.pool import Pool
+from threading import Semaphore
 
 import os
 
@@ -59,6 +62,10 @@ class ActorCritic(nn.Module):
     def act(self, obs):
         return self.pi(obs).detach().numpy()
 
+def init_proc():
+    log.debug(f"initializing {os.getpid()}")
+    os.environ["OMP_NUM_THREADS"] = "1"
+
 class DDPG:
     def __init__(self, save_dir, env, hparams):
         self.env = env
@@ -69,12 +76,23 @@ class DDPG:
         obs_dim = env.observation_space.size
         act_dim = env.action_space.size
 
+        # hparams includes num_workers, num_test_episodes, and seed
+        # which we consider (perhaps arguably) not to be
+        # hyperparameters.  We thus don't store them in the json file.
+        # This means we can restart training with different settings
+        # for each.
+        self.num_workers = hparams.num_workers
+        self.num_test_episodes = hparams.num_test_episodes
+
+        # Seed
+        self.rng = np.random.default_rng(hparams.seed)
+        torch.manual_seed(hparams.seed)
+        
+        del hparams.num_workers, hparams.num_test_episodes, hparams.seed
+
         # Hyperparameters
         self.hparams = hparams        
 
-        # Seed
-        self.rng = np.random.default_rng(hparams.seed) # TODO: seed
-        torch.manual_seed(hparams.seed)
 
         input_encoding = Mode8 # TODO: get from caller.
         output_activation = lambda : ExpTanh(
@@ -197,6 +215,7 @@ class DDPG:
         return a
 
     def run_episode(self, ep_no, use_start_actions):
+        log.info(f"Run {ep_no} on {os.getpid()}")
         # To gain some determinism for debugging, and to allow
         # episodes to run on separate threads, each episode gets its
         # own sequentially seeded random number generator.
@@ -233,11 +252,11 @@ class DDPG:
 
         with self.replay_buffer._lock:
             for o, a, r, o2, done in ep_log:
-                self.replay_buffer.store_array(o, a, r, o2, done)
+                index = self.replay_buffer.store_array(o, a, r, o2, done)
 
         t_store = time()
 
-        log.debug(f"episode {ep_no} done, len={len(ep_log)}, ret={ep_ret}, times (setup+run+store)={t_eps-t_start:.3f}+{t_steps-t_eps:.3f}+{t_store-t_steps:.3f}={t_store-t_start:.3f}")
+        log.debug(f"episode {ep_no} done, len={len(ep_log)}, ret={ep_ret}, times (setup+run+store)={t_eps-t_start:.3f}+{t_steps-t_eps:.3f}+{t_store-t_steps:.3f}={t_store-t_start:.3f}, fill={index/self.replay_buffer.capacity:.3f}")
 
         return ep_ret, len(ep_log)
 
@@ -251,30 +270,64 @@ class DDPG:
         log.info(f"test episode {test_no} done, len={ep_len}, ret={ep_ret}")
         return ep_ret, ep_len
 
+    def create_pool(self):
+        return NonPool() if self.num_workers == 1 else Pool(self.num_workers, init_proc)
+
     def train_epoch(self):
         self.epoch_no += 1
         log.info(f"Starting epoch {self.epoch_no}")
         steps_taken = self.replay_buffer.steps_taken()
         start_index = self.replay_buffer.index()
+        semaphore = Semaphore(self.num_workers)
         while steps_taken < self.next_epoch:
             with torch.no_grad():
-                while steps_taken < self.next_epoch and steps_taken < self.next_update:
-                    self.ep_no += 1
-                    ep_ret, ep_len = self.run_episode(self.ep_no, steps_taken < self.hparams.start_steps)
-                    steps_taken = self.replay_buffer.steps_taken()
+                log.debug(f"starting process pool with {self.num_workers} workers")
+                # Hacky: declare do_run_episode as global to avoid pickling self
+                # https://stackoverflow.com/a/61879723
+                global do_run_episode
+                def do_run_episode(*args):
+                    return self.run_episode(*args)
+                
+                with self.create_pool() as pool:
+                    while steps_taken < self.next_epoch and steps_taken < self.next_update:
+                        self.ep_no += 1
+                        log.debug(f"launching {self.ep_no}, steps_taken={steps_taken}, next_update={self.next_update}, next_epoch={self.next_epoch}")
+                        def done(x):
+                            log.debug(f"done {x}")
+                            ep_ret, ep_len = x
+                            self.epoch_logger.accum(EpRet=ep_ret, EpLen=ep_len)
+                            semaphore.release()
+                        pool.apply_async(
+                            do_run_episode,
+                            (self.ep_no, steps_taken < self.hparams.start_steps), {},
+                            done, done)
+                        semaphore.acquire()
+                        steps_taken = self.replay_buffer.steps_taken()
+                    pool.close()
+                    pool.join()
             
             while steps_taken >= self.next_update:
-                for _ in range(self.prev_update, self.next_update):
+                for update_no in range(self.prev_update, self.next_update):
+                    log.info(f"Update {update_no}")
                     batch = self.replay_buffer.sample_batch(self.rng, self.hparams.batch_size)
                     self.update(data=batch)
                 self.prev_update = self.next_update
                 self.next_update += self.hparams.update_every
 
         with torch.no_grad():
-            for _ in range(self.hparams.num_test_episodes): # TODO: this is not really a hyper parameter
-                self.test_no += 1
-                ep_ret, ep_len = self.test_episode(self.test_no)
-                self.epoch_logger.accum(TestEpRet=ep_ret, TestEpLen=ep_len)
+            global do_test_episode
+            def do_test_episode(*args):
+                return self.test_episode(*args)
+            with self.create_pool() as pool:
+                results = []
+                for _ in range(self.num_test_episodes):
+                    self.test_no += 1
+                    results.append(pool.apply_async(do_test_episode, (self.test_no,), {}))
+                pool.close()
+                pool.join()
+                for r in results:
+                    ep_ret, ep_len = r.get()
+                    self.epoch_logger.accum(TestEpRet=ep_ret, TestEpLen=ep_len)
 
         self.next_epoch += self.hparams.steps_per_epoch
         

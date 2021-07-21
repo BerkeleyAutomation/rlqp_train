@@ -141,6 +141,7 @@ class ReplayBuffer:
 
         self.indexing[0] += n
         self.indexing[1] += 1
+        return self.indexing[0]
 
     def sample_batch(self, rng, batch_size):
         size = min(self.indexing[0], self.capacity)

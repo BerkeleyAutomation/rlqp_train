@@ -38,7 +38,7 @@ checkpoint = epoch_logger.load_checkpoint(args.checkpoint)
 ac.load_state_dict(checkpoint['ac'])
 
 print("Tracing")
-example_input = torch.rand(6) # Ax, y, z, l, u, rho
+example_input = torch.rand((1,6)) # Ax, y, z, l, u, rho
 traced_model = torch.jit.trace(ac.pi, example_input)
 
 if args.traced_output is not None:
