@@ -1,3 +1,8 @@
+# IMPORTANT! INCOMPLETE
+
+We are in the process of cleaning up and migrating research-quality code to this repo.  This repo currently only has an implementation of DDPG, and TD3 is not yet tested.  DDPG, however seems to work well in practice.
+
+Feel free to file an issue with any questions or concerns.
 
 # Submodules
 
