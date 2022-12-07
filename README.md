@@ -28,6 +28,7 @@ For all these instructions, we assume the environment variable `RLQP` is set to 
 
 Create a virtual environment (1 time)
 
+    % export RLQP=`pwd`
     % cd $RLQP
     % virtualenv venv/rlqp
 
